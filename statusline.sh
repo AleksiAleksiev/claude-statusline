@@ -178,4 +178,6 @@ fi
 
 if [ -n "$usage_line" ]; then
   echo -e "$usage_line"
+elif [ -f "$usage_cache" ] && [ -n "$(jq -r '.error // empty' "$usage_cache" 2>/dev/null)" ]; then
+  echo -e "${dim}usage: api error${reset}"
 fi
