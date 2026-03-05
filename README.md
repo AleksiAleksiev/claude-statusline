@@ -1,0 +1,64 @@
+# claude-statusline
+
+A bash statusline for Claude Code. Shows context usage, token counts, cost, git branch, and subscription rate limits — all in a single script.
+
+## Screenshot
+
+```
+Opus 4.6 (1M context) | █░░░░░░░░░ 10% | $4.56 | AA-generators*
+window: 1000000 | 104051 tokens | >200k: false
+5h: ██████████ 100% (32m) | 7d: █████░░░░░ 52% (14h 32m)
+```
+
+## What it shows
+
+| Line | Content |
+|------|---------|
+| **1** | Model name, context bar with color, session cost, git branch (with dirty indicator) |
+| **2** | Context window size, total input tokens (colored by 200k threshold), >200k flag. The 200k tracking is useful when running 1M context models but wanting to stay under 200k for faster responses and lower cache costs. |
+| **3** | 5-hour and 7-day rate limit usage with bars, percentages, and reset countdowns (Pro/Max/Team only) |
+
+### Context bar colors
+- Green: < 70%
+- Yellow: 70–84%
+- Red: 85%+
+
+### Usage bar colors
+- Blue: < 75%
+- Magenta: 75–89%
+- Red: 90%+
+
+## Requirements
+
+- Bash (Git Bash on Windows)
+- `jq`
+- `curl` (for usage API)
+
+## Install
+
+1. Copy the script:
+   ```bash
+   cp statusline.sh ~/.claude/statusline.sh
+   ```
+
+2. Set it in `~/.claude/settings.json`:
+   ```json
+   {
+     "statusLine": {
+       "type": "command",
+       "command": "bash ~/.claude/statusline.sh"
+     }
+   }
+   ```
+
+## Usage API
+
+Rate limit data is fetched from `https://api.anthropic.com/api/oauth/usage` using the OAuth token from `~/.claude/.credentials.json`. Results are cached to `~/.claude/.usage-cache.json` with a 60s TTL (120s on errors). Only available for Pro/Max/Team subscriptions — API key users see no usage line.
+
+## Platform
+
+Tested on Windows (Git Bash). Uses GNU `stat -c` and `date -d` which are not available on macOS.
+
+## License
+
+MIT
