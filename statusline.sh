@@ -66,8 +66,8 @@ echo -e "window: ${ctx_size} | ${input_color}${input_total}${reset} tokens | ${e
 # --- Usage limits (Pro/Max/Team) ---
 creds_file="$HOME/.claude/.credentials.json"
 usage_cache="$HOME/.claude/.usage-cache.json"
-cache_ttl=60
-fail_ttl=120
+cache_ttl=125
+fail_ttl=125
 
 usage_line=""
 if [ -f "$creds_file" ]; then
