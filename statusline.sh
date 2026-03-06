@@ -63,6 +63,23 @@ fi
 
 echo -e "window: ${ctx_size} | ${input_color}${input_total}${reset} tokens | ${exceed_color}>200k: ${exceeds_200k}${reset}"
 
+# Cache hit rate
+cache_total=$((cur_cache_read + cur_cache_create + cur_input))
+if [ "$cache_total" -gt 0 ]; then
+  cache_hit=$((cur_cache_read * 100 / cache_total))
+  if [ "$cache_hit" -ge 80 ]; then
+    cache_color='\033[32m'
+    cache_label="warm"
+  elif [ "$cache_hit" -ge 40 ]; then
+    cache_color='\033[33m'
+    cache_label="warming"
+  else
+    cache_color='\033[31m'
+    cache_label="cold"
+  fi
+  echo -e "cache: ${cache_color}${cache_hit}% hit${reset} ${dim}(${cache_label})${reset}"
+fi
+
 # --- Usage limits (Pro/Max/Team) ---
 creds_file="$HOME/.claude/.credentials.json"
 usage_cache="$HOME/.claude/.usage-cache.json"
