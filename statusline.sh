@@ -5,24 +5,24 @@ data=$(cat)
 repeat() { local s="" i; for ((i=0; i<$2; i++)); do s+="$1"; done; printf '%s' "$s"; }
 
 # Extract all fields in a single jq call
-IFS=$'\t' read -r model ctx_used ctx_size exceeds_200k cost cur_input cur_cache_create cur_cache_read total_duration_ms api_duration_ms <<< \
+IFS=$'\t' read -r model ctx_used ctx_size cost cur_input cur_cache_create cur_cache_read cur_output total_duration_ms api_duration_ms <<< \
   "$(echo "$data" | jq -r '[
     (.model.display_name // "unknown"),
     (.context_window.used_percentage // 0 | floor),
     (.context_window.context_window_size // 0),
-    (.exceeds_200k_tokens // false),
     (.cost.total_cost_usd // 0),
     (.context_window.current_usage.input_tokens // 0),
     (.context_window.current_usage.cache_creation_input_tokens // 0),
     (.context_window.current_usage.cache_read_input_tokens // 0),
+    (.context_window.current_usage.output_tokens // 0),
     (.cost.total_duration_ms // 0),
     (.cost.total_api_duration_ms // 0)
   ] | @tsv')"
 
-input_total=$((cur_input + cur_cache_create + cur_cache_read))
+token_total=$((cur_input + cur_cache_create + cur_cache_read + cur_output))
 
-# Color input_total based on 200k threshold
-input_pct=$((input_total * 100 / 200000))
+# Color token_total based on 200k threshold
+input_pct=$((token_total * 100 / 200000))
 if [ "$input_pct" -ge 90 ]; then
   input_color='\033[31m'
 elif [ "$input_pct" -ge 70 ]; then
@@ -58,12 +58,6 @@ if [ -n "$branch" ]; then
 fi
 
 echo -e "${model} | ${color}${filled_str}${dim}${empty_str}${reset} ${color}${ctx_used}%${reset} | ${cost_fmt} | ${branch}"
-# >200k color
-if [ "$exceeds_200k" = "true" ]; then
-  exceed_color='\033[31m'
-else
-  exceed_color="$reset"
-fi
 
 # Shorten window size to human-readable
 if [ "$ctx_size" -ge 1000000 ]; then
@@ -73,8 +67,6 @@ elif [ "$ctx_size" -ge 1000 ]; then
 else
   ctx_label="$ctx_size"
 fi
-
-echo -e "window: ${ctx_label} | ${input_color}${input_total}${reset} tokens | ${exceed_color}>200k: ${exceeds_200k}${reset}"
 
 # Format milliseconds to human-readable duration
 fmt_duration() {
@@ -93,7 +85,16 @@ fmt_duration() {
   fi
 }
 
-# Cache hit rate + session duration
+# Line 2: window | tokens | session | api
+line2="window: ${ctx_label} | ${input_color}${token_total}${reset} tokens"
+if [ "$total_duration_ms" -gt 0 ]; then
+  wall=$(fmt_duration "$total_duration_ms")
+  api=$(fmt_duration "$api_duration_ms")
+  line2="${line2} ${dim}|${reset} session: ${wall} ${dim}|${reset} api: ${api}"
+fi
+echo -e "$line2"
+
+# Line 3: cache hit rate + last timestamp
 cache_total=$((cur_cache_read + cur_cache_create + cur_input))
 if [ "$cache_total" -gt 0 ]; then
   cache_hit=$((cur_cache_read * 100 / cache_total))
@@ -108,11 +109,7 @@ if [ "$cache_total" -gt 0 ]; then
     cache_label="cold"
   fi
   cache_line="cache: ${cache_color}${cache_hit}% hit${reset} ${dim}(${cache_label})${reset}"
-  if [ "$total_duration_ms" -gt 0 ]; then
-    wall=$(fmt_duration "$total_duration_ms")
-    api=$(fmt_duration "$api_duration_ms")
-    cache_line="${cache_line} ${dim}|${reset} session: ${wall} ${dim}|${reset} api: ${api}"
-  fi
+  cache_line="${cache_line} ${dim}| last: $(date +'%H:%M')${reset}"
   echo -e "$cache_line"
 fi
 
