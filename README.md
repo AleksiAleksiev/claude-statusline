@@ -60,7 +60,9 @@ cache: 99% hit (warm)
 
 ## Usage API
 
-Rate limit data is fetched from `https://api.anthropic.com/api/oauth/usage` using the OAuth token from `~/.claude/.credentials.json`. Results are cached to `~/.claude/.usage-cache.json` with a 60s TTL (120s on errors). Only available for Pro/Max/Team subscriptions — API key users see no usage line.
+Rate limit data is fetched from `https://api.anthropic.com/api/oauth/usage` using the OAuth token from `~/.claude/.credentials.json`. Results are cached to `~/.claude/.usage-cache.json` with a 125s TTL. Only available for Pro/Max/Team subscriptions — API key users see no usage line.
+
+The usage API is prone to returning HTTP 429 (rate limiting). When this happens, the last successful response is preserved and displayed with a `(stale - api error)` disclaimer.
 
 ## Platform
 

@@ -119,9 +119,14 @@ if [ -f "$creds_file" ]; then
           -H "anthropic-beta: oauth-2025-04-20" \
           https://api.anthropic.com/api/oauth/usage 2>/dev/null)
         if echo "$resp" | jq -e '.five_hour' >/dev/null 2>&1; then
-          echo "$resp" > "$usage_cache"
+          echo "$resp" | jq '{five_hour, seven_day, extra_usage}' > "$usage_cache"
         else
-          echo '{"error":true}' > "$usage_cache"
+          # Mark stale but preserve last good data
+          if [ -f "$usage_cache" ]; then
+            jq '. + {error: true}' "$usage_cache" > "${usage_cache}.tmp" && mv "${usage_cache}.tmp" "$usage_cache"
+          else
+            echo '{"error":true}' > "$usage_cache"
+          fi
         fi
       fi
     fi
@@ -194,6 +199,10 @@ if [ -f "$creds_file" ]; then
 fi
 
 if [ -n "$usage_line" ]; then
+  is_stale=$(jq -r '.error // empty' "$usage_cache" 2>/dev/null)
+  if [ -n "$is_stale" ]; then
+    usage_line="${usage_line} ${dim}(stale - api error)${reset}"
+  fi
   echo -e "$usage_line"
 elif [ -f "$usage_cache" ] && [ -n "$(jq -r '.error // empty' "$usage_cache" 2>/dev/null)" ]; then
   echo -e "${dim}usage: api error${reset}"
