@@ -4,17 +4,21 @@ data=$(cat)
 # Repeat a string N times (tr mangles multi-byte UTF-8)
 repeat() { local s="" i; for ((i=0; i<$2; i++)); do s+="$1"; done; printf '%s' "$s"; }
 
-model=$(echo "$data" | jq -r '.model.display_name // "unknown"')
-ctx_used=$(echo "$data" | jq -r '.context_window.used_percentage // 0' | cut -d. -f1)
+# Extract all fields in a single jq call
+IFS=$'\t' read -r model ctx_used ctx_size exceeds_200k cost cur_input cur_cache_create cur_cache_read total_duration_ms api_duration_ms <<< \
+  "$(echo "$data" | jq -r '[
+    (.model.display_name // "unknown"),
+    (.context_window.used_percentage // 0 | floor),
+    (.context_window.context_window_size // 0),
+    (.exceeds_200k_tokens // false),
+    (.cost.total_cost_usd // 0),
+    (.context_window.current_usage.input_tokens // 0),
+    (.context_window.current_usage.cache_creation_input_tokens // 0),
+    (.context_window.current_usage.cache_read_input_tokens // 0),
+    (.cost.total_duration_ms // 0),
+    (.cost.total_api_duration_ms // 0)
+  ] | @tsv')"
 
-ctx_size=$(echo "$data" | jq -r '.context_window.context_window_size // 0')
-exceeds_200k=$(echo "$data" | jq -r '.exceeds_200k_tokens // false')
-cost=$(echo "$data" | jq -r '.cost.total_cost_usd // 0')
-
-# Sum of input token fields
-cur_input=$(echo "$data" | jq -r '.context_window.current_usage.input_tokens // 0')
-cur_cache_create=$(echo "$data" | jq -r '.context_window.current_usage.cache_creation_input_tokens // 0')
-cur_cache_read=$(echo "$data" | jq -r '.context_window.current_usage.cache_read_input_tokens // 0')
 input_total=$((cur_input + cur_cache_create + cur_cache_read))
 
 # Color input_total based on 200k threshold
@@ -61,9 +65,35 @@ else
   exceed_color="$reset"
 fi
 
-echo -e "window: ${ctx_size} | ${input_color}${input_total}${reset} tokens | ${exceed_color}>200k: ${exceeds_200k}${reset}"
+# Shorten window size to human-readable
+if [ "$ctx_size" -ge 1000000 ]; then
+  ctx_label="$((ctx_size / 1000000))M"
+elif [ "$ctx_size" -ge 1000 ]; then
+  ctx_label="$((ctx_size / 1000))k"
+else
+  ctx_label="$ctx_size"
+fi
 
-# Cache hit rate
+echo -e "window: ${ctx_label} | ${input_color}${input_total}${reset} tokens | ${exceed_color}>200k: ${exceeds_200k}${reset}"
+
+# Format milliseconds to human-readable duration
+fmt_duration() {
+  local ms="$1"
+  local s=$((ms / 1000)) h=0 m=0
+  if [ "$s" -ge 3600 ]; then
+    h=$((s / 3600)); s=$((s % 3600))
+  fi
+  m=$((s / 60)); s=$((s % 60))
+  if [ "$h" -gt 0 ]; then
+    printf '%dh %dm %ds' "$h" "$m" "$s"
+  elif [ "$m" -gt 0 ]; then
+    printf '%dm %ds' "$m" "$s"
+  else
+    printf '%ds' "$s"
+  fi
+}
+
+# Cache hit rate + session duration
 cache_total=$((cur_cache_read + cur_cache_create + cur_input))
 if [ "$cache_total" -gt 0 ]; then
   cache_hit=$((cur_cache_read * 100 / cache_total))
@@ -77,14 +107,20 @@ if [ "$cache_total" -gt 0 ]; then
     cache_color='\033[31m'
     cache_label="cold"
   fi
-  echo -e "cache: ${cache_color}${cache_hit}% hit${reset} ${dim}(${cache_label})${reset}"
+  cache_line="cache: ${cache_color}${cache_hit}% hit${reset} ${dim}(${cache_label})${reset}"
+  if [ "$total_duration_ms" -gt 0 ]; then
+    wall=$(fmt_duration "$total_duration_ms")
+    api=$(fmt_duration "$api_duration_ms")
+    cache_line="${cache_line} ${dim}|${reset} session: ${wall} ${dim}|${reset} api: ${api}"
+  fi
+  echo -e "$cache_line"
 fi
 
 # --- Usage limits (Pro/Max/Team) ---
 creds_file="$HOME/.claude/.credentials.json"
 usage_cache="$HOME/.claude/.usage-cache.json"
-cache_ttl=125
-fail_ttl=125
+cache_ttl=245
+fail_ttl=245
 
 usage_line=""
 if [ -f "$creds_file" ]; then
