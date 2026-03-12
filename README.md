@@ -53,7 +53,7 @@ cache: 99% hit (warm) | last: 19:21
    {
      "statusLine": {
        "type": "command",
-       "command": "bash ~/.claude/statusline.sh"
+       "command": "bash $HOME/.claude/statusline.sh"
      }
    }
    ```
@@ -66,7 +66,7 @@ The usage API is prone to returning HTTP 429 (rate limiting). When this happens,
 
 ## Platform
 
-Tested on Windows (Git Bash). Uses GNU `stat -c` and `date -d` which are not available on macOS.
+Tested on Windows (Git Bash) and Linux/WSL. Uses GNU `stat -c` and `date -d` which are not available on macOS.
 
 ## License
 
