@@ -4,20 +4,31 @@ data=$(cat)
 # Repeat a string N times (tr mangles multi-byte UTF-8)
 repeat() { local s="" i; for ((i=0; i<$2; i++)); do s+="$1"; done; printf '%s' "$s"; }
 
-# Extract all fields in a single jq call
-IFS=$'\t' read -r model ctx_used ctx_size cost cur_input cur_cache_create cur_cache_read cur_output total_duration_ms api_duration_ms <<< \
+# Extract all fields in a single jq call.
+# Uses ASCII Unit Separator (\x1f) instead of \t — `read` with whitespace IFS
+# collapses consecutive separators, which would lose empty fields like effort.
+# rate_limits.* uses -1 as a sentinel for absent (API-key users, or before first response).
+IFS=$'\x1f' read -r model effort cwd ctx_used ctx_size cost lines_added lines_removed cur_input cur_cache_create cur_cache_read cur_output total_duration_ms api_duration_ms five_h five_h_reset seven_d seven_d_reset <<< \
   "$(echo "$data" | jq -r '[
     (.model.display_name // "unknown"),
+    (.effort.level // ""),
+    (.workspace.current_dir // .cwd // ""),
     (.context_window.used_percentage // 0 | floor),
     (.context_window.context_window_size // 0),
     (.cost.total_cost_usd // 0),
+    (.cost.total_lines_added // 0),
+    (.cost.total_lines_removed // 0),
     (.context_window.current_usage.input_tokens // 0),
     (.context_window.current_usage.cache_creation_input_tokens // 0),
     (.context_window.current_usage.cache_read_input_tokens // 0),
     (.context_window.current_usage.output_tokens // 0),
     (.cost.total_duration_ms // 0),
-    (.cost.total_api_duration_ms // 0)
-  ] | @tsv')"
+    (.cost.total_api_duration_ms // 0),
+    (.rate_limits.five_hour.used_percentage // -1 | floor),
+    (.rate_limits.five_hour.resets_at // -1),
+    (.rate_limits.seven_day.used_percentage // -1 | floor),
+    (.rate_limits.seven_day.resets_at // -1)
+  ] | join("")')"
 
 token_total=$((cur_input + cur_cache_create + cur_cache_read + cur_output))
 
@@ -40,24 +51,42 @@ filled_str=$(repeat '█' $filled)
 empty_str=$(repeat '░' $empty)
 dim='\033[2m'
 
-# Color: green <70, yellow 70-84, red 85+
-if [ "$ctx_used" -ge 85 ]; then
-  color='\033[31m'
-elif [ "$ctx_used" -ge 70 ]; then
-  color='\033[33m'
-else
-  color='\033[32m'
-fi
+# Bar stays green — token count on line 2 carries the perf-pressure signal.
+color='\033[32m'
 reset='\033[0m'
 
-branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
-if [ -n "$branch" ]; then
-  if ! git diff --quiet 2>/dev/null; then
-    branch="${branch}*"
-  fi
+# Run git in the actual session cwd, not wherever the script was spawned —
+# matters when /add-dir or a subagent has shifted the active directory.
+branch=""
+if [ -n "$cwd" ] && [ -d "$cwd" ]; then
+  branch=$(cd "$cwd" && git rev-parse --abbrev-ref HEAD 2>/dev/null || true)
 fi
 
-echo -e "${model} | ${color}${filled_str}${dim}${empty_str}${reset} ${color}${ctx_used}%${reset} | ${cost_fmt} | ${branch}"
+# Strip both forward and back slashes so this works on Windows paths.
+dir_name="${cwd##*[/\\]}"
+if [ -n "$branch" ]; then
+  dir_branch="${dir_name} ${dim}[${reset}${branch}${dim}]${reset}"
+else
+  dir_branch="${dir_name}"
+fi
+
+# Append lines added/removed (git diff style colors). Hide each side when zero.
+green='\033[32m'
+red='\033[31m'
+if [ "$lines_added" -gt 0 ] && [ "$lines_removed" -gt 0 ]; then
+  dir_branch="${dir_branch} ${green}+${lines_added}${reset} ${red}-${lines_removed}${reset}"
+elif [ "$lines_added" -gt 0 ]; then
+  dir_branch="${dir_branch} ${green}+${lines_added}${reset}"
+elif [ "$lines_removed" -gt 0 ]; then
+  dir_branch="${dir_branch} ${red}-${lines_removed}${reset}"
+fi
+
+if [ -n "$effort" ]; then
+  model_seg="${model} ${dim}(${effort})${reset}"
+else
+  model_seg="${model}"
+fi
+echo -e "${model_seg} | ${color}${filled_str}${dim}${empty_str}${reset} ${color}${ctx_used}%${reset} | ${cost_fmt} | ${dir_branch}"
 
 # Shorten window size to human-readable
 if [ "$ctx_size" -ge 1000000 ]; then
@@ -113,130 +142,65 @@ if [ "$cache_total" -gt 0 ]; then
   echo -e "$cache_line"
 fi
 
-# --- Usage limits (Pro/Max/Team) ---
-creds_file="$HOME/.claude/.credentials.json"
-usage_cache="$HOME/.claude/.usage-cache.json"
-cache_ttl=245
-fail_ttl=245
+# --- Usage limits (Pro/Max) ---
+# Sourced from rate_limits.* in Claude Code's stdin JSON. Absent for API-key users
+# and before the first API response of the session — we use -1 as the sentinel.
+fmt_reset() {
+  local reset_epoch="$1"
+  if [ "$reset_epoch" -le 0 ]; then return; fi
+  local diff=$(( reset_epoch - $(date +%s) ))
+  if [ "$diff" -le 0 ]; then printf 'now'; return; fi
+  local h=$((diff / 3600)) m=$(( (diff % 3600) / 60 ))
+  if [ "$h" -gt 0 ]; then
+    printf '%dh %dm' "$h" "$m"
+  else
+    printf '%dm' "$m"
+  fi
+}
 
+bright_blue='\033[94m'
+bright_magenta='\033[95m'
 usage_line=""
-if [ -f "$creds_file" ]; then
-  sub_type=$(jq -r '.claudeAiOauth.subscriptionType // ""' "$creds_file")
-  plan=""
-  case "$sub_type" in
-    *max*|*Max*) plan="Max" ;;
-    *pro*|*Pro*) plan="Pro" ;;
-    *team*|*Team*) plan="Team" ;;
-  esac
 
-  if [ -n "$plan" ]; then
-    # Check cache age — use longer TTL for failed responses
-    fetch=true
-    if [ -f "$usage_cache" ]; then
-      cache_age=$(( $(date +%s) - $(stat -c %Y "$usage_cache" 2>/dev/null || echo 0) ))
-      is_error=$(jq -r '.error // empty' "$usage_cache" 2>/dev/null)
-      ttl=$cache_ttl
-      if [ -n "$is_error" ]; then
-        ttl=$fail_ttl
-      fi
-      if [ "$cache_age" -lt "$ttl" ]; then
-        fetch=false
-      fi
-    fi
-
-    if [ "$fetch" = true ]; then
-      token=$(jq -r '.claudeAiOauth.accessToken // ""' "$creds_file")
-      if [ -n "$token" ]; then
-        resp=$(curl -s --max-time 5 \
-          -H "Authorization: Bearer $token" \
-          -H "anthropic-beta: oauth-2025-04-20" \
-          https://api.anthropic.com/api/oauth/usage 2>/dev/null)
-        if echo "$resp" | jq -e '.five_hour' >/dev/null 2>&1; then
-          echo "$resp" | jq '{five_hour, seven_day, extra_usage}' > "$usage_cache"
-        else
-          # Mark stale but preserve last good data
-          if [ -f "$usage_cache" ]; then
-            jq '. + {error: true}' "$usage_cache" > "${usage_cache}.tmp" && mv "${usage_cache}.tmp" "$usage_cache"
-          else
-            echo '{"error":true}' > "$usage_cache"
-          fi
-        fi
-      fi
-    fi
-
-    if [ -f "$usage_cache" ]; then
-      five_h=$(jq -r '.five_hour.utilization // empty' "$usage_cache" 2>/dev/null | cut -d. -f1)
-      seven_d=$(jq -r '.seven_day.utilization // empty' "$usage_cache" 2>/dev/null | cut -d. -f1)
-      five_h_reset=$(jq -r '.five_hour.resets_at // empty' "$usage_cache" 2>/dev/null)
-      seven_d_reset=$(jq -r '.seven_day.resets_at // empty' "$usage_cache" 2>/dev/null)
-
-      # Format reset time as countdown
-      fmt_reset() {
-        local reset_at="$1"
-        if [ -z "$reset_at" ]; then return; fi
-        local reset_epoch=$(date -d "$reset_at" +%s 2>/dev/null)
-        if [ -z "$reset_epoch" ]; then return; fi
-        local diff=$(( reset_epoch - $(date +%s) ))
-        if [ "$diff" -le 0 ]; then printf 'now'; return; fi
-        local h=$((diff / 3600)) m=$(( (diff % 3600) / 60 ))
-        if [ "$h" -gt 0 ]; then
-          printf '%dh %dm' "$h" "$m"
-        else
-          printf '%dm' "$m"
-        fi
-      }
-
-      bright_blue='\033[94m'
-      bright_magenta='\033[95m'
-
-      if [ -n "$five_h" ]; then
-        if [ "$five_h" -ge 90 ]; then
-          uc='\033[31m'
-        elif [ "$five_h" -ge 75 ]; then
-          uc="$bright_magenta"
-        else
-          uc="$bright_blue"
-        fi
-        uf=$((five_h / 10))
-        ue=$((10 - uf))
-        uf_str=$(repeat '█' $uf)
-        ue_str=$(repeat '░' $ue)
-        five_reset_str=$(fmt_reset "$five_h_reset")
-        usage_line="5h: ${uc}${uf_str}${dim}${ue_str}${reset} ${uc}${five_h}%${reset}"
-        if [ -n "$five_reset_str" ]; then
-          usage_line="${usage_line} ${dim}(${five_reset_str})${reset}"
-        fi
-      fi
-
-      if [ -n "$seven_d" ]; then
-        if [ "$seven_d" -ge 90 ]; then
-          sc='\033[31m'
-        elif [ "$seven_d" -ge 75 ]; then
-          sc="$bright_magenta"
-        else
-          sc="$bright_blue"
-        fi
-        sf=$((seven_d / 10))
-        se=$((10 - sf))
-        sf_str=$(repeat '█' $sf)
-        se_str=$(repeat '░' $se)
-        seven_reset_str=$(fmt_reset "$seven_d_reset")
-        seven_part="7d: ${sc}${sf_str}${dim}${se_str}${reset} ${sc}${seven_d}%${reset}"
-        if [ -n "$seven_reset_str" ]; then
-          seven_part="${seven_part} ${dim}(${seven_reset_str})${reset}"
-        fi
-        usage_line="${usage_line:+$usage_line | }${seven_part}"
-      fi
-    fi
+if [ "$five_h" -ge 0 ]; then
+  if [ "$five_h" -ge 90 ]; then
+    uc='\033[31m'
+  elif [ "$five_h" -ge 75 ]; then
+    uc="$bright_magenta"
+  else
+    uc="$bright_blue"
+  fi
+  uf=$((five_h / 10))
+  ue=$((10 - uf))
+  uf_str=$(repeat '█' $uf)
+  ue_str=$(repeat '░' $ue)
+  five_reset_str=$(fmt_reset "$five_h_reset")
+  usage_line="5h: ${uc}${uf_str}${dim}${ue_str}${reset} ${uc}${five_h}%${reset}"
+  if [ -n "$five_reset_str" ]; then
+    usage_line="${usage_line} ${dim}(${five_reset_str})${reset}"
   fi
 fi
 
-if [ -n "$usage_line" ]; then
-  is_stale=$(jq -r '.error // empty' "$usage_cache" 2>/dev/null)
-  if [ -n "$is_stale" ]; then
-    usage_line="${usage_line} ${dim}(stale - api error)${reset}"
+if [ "$seven_d" -ge 0 ]; then
+  if [ "$seven_d" -ge 90 ]; then
+    sc='\033[31m'
+  elif [ "$seven_d" -ge 75 ]; then
+    sc="$bright_magenta"
+  else
+    sc="$bright_blue"
   fi
+  sf=$((seven_d / 10))
+  se=$((10 - sf))
+  sf_str=$(repeat '█' $sf)
+  se_str=$(repeat '░' $se)
+  seven_reset_str=$(fmt_reset "$seven_d_reset")
+  seven_part="7d: ${sc}${sf_str}${dim}${se_str}${reset} ${sc}${seven_d}%${reset}"
+  if [ -n "$seven_reset_str" ]; then
+    seven_part="${seven_part} ${dim}(${seven_reset_str})${reset}"
+  fi
+  usage_line="${usage_line:+$usage_line | }${seven_part}"
+fi
+
+if [ -n "$usage_line" ]; then
   echo -e "$usage_line"
-elif [ -f "$usage_cache" ] && [ -n "$(jq -r '.error // empty' "$usage_cache" 2>/dev/null)" ]; then
-  echo -e "${dim}usage: api error${reset}"
 fi

@@ -1,29 +1,29 @@
 # claude-statusline
 
-A bash statusline for Claude Code. Shows context usage, token counts, cost, git branch, and subscription rate limits — all in a single script.
+A bash statusline for Claude Code. Shows context usage, token counts, cost, working directory, git branch, lines changed, cache temperature, and subscription rate limits — all in a single script.
 
 ## Screenshot
 
 ```
-Opus 4.6 (1M context) | █░░░░░░░░░ 10% | $4.56 | AA-generators*
-window: 1M | 104051 tokens | session: 42m 30s | api: 6m 47s
-cache: 99% hit (warm) | last: 19:21
-5h: ██████████ 100% (32m) | 7d: █████░░░░░ 52% (14h 32m)
+Opus 4.7 (xhigh) | ████░░░░░░ 42% | $4.56 | claude-statusline [master] +156 -23
+window: 1M | 109700 tokens | session: 42m 30s | api: 6m 47s
+cache: 87% hit (warm) | last: 19:21
+5h: ███░░░░░░░ 32% (1h 32m) | 7d: ████████░░ 88% (14h 32m)
 ```
 
 ## What it shows
 
 | Line | Content |
 |------|---------|
-| **1** | Model name, context bar with color, session cost, git branch (with dirty indicator) |
-| **2** | Context window size, total tokens (colored by 200k threshold), session wall-clock and API duration |
-| **3** | Cache hit rate with warm/warming/cold indicator, timestamp of last render (useful for checking prompt cache TTL) |
-| **4** | 5-hour and 7-day rate limit usage with bars, percentages, and reset countdowns (Pro/Max/Team only) |
+| **1** | Model + reasoning effort, context bar, session cost, working dir + git branch, lines added/removed |
+| **2** | Context window size, total tokens (colored by perf threshold), session wall-clock and API duration |
+| **3** | Cache hit rate with warm/warming/cold indicator, timestamp of last interaction (useful for checking the 1h prompt-cache TTL when returning after a break) |
+| **4** | 5-hour and 7-day rate limit usage with bars, percentages, and reset countdowns (Pro/Max only) |
 
-### Context bar colors
-- Green: < 70%
-- Yellow: 70–84%
-- Red: 85%+
+### Token count colors
+- Green: < 140k
+- Yellow: 140k–180k
+- Red: 180k+
 
 ### Cache hit colors
 - Green (warm): 80%+ of input from cache reads
@@ -37,9 +37,9 @@ cache: 99% hit (warm) | last: 19:21
 
 ## Requirements
 
-- Bash (Git Bash on Windows)
+- Bash (Git Bash on Windows works)
 - `jq`
-- `curl` (for usage API)
+- `git` (optional — branch indicator is skipped outside repos)
 
 ## Install
 
@@ -58,15 +58,13 @@ cache: 99% hit (warm) | last: 19:21
    }
    ```
 
-## Usage API
+## Data sources
 
-Rate limit data is fetched from `https://api.anthropic.com/api/oauth/usage` using the OAuth token from `~/.claude/.credentials.json`. Results are cached to `~/.claude/.usage-cache.json` with a 245s TTL. Only available for Pro/Max/Team subscriptions — API key users see no usage line.
-
-The usage API is prone to returning HTTP 429 (rate limiting). When this happens, the last successful response is preserved and displayed with a `(stale - api error)` disclaimer.
+All fields come from the JSON Claude Code pipes to the script on stdin (see [statusline docs](https://code.claude.com/docs/en/statusline)). No external API calls, no credentials, no cache files. Rate limit data uses `rate_limits.*` and is populated for Pro/Max accounts after the first API response of the session — API-key users see no usage line.
 
 ## Platform
 
-Tested on Windows (Git Bash) and Linux/WSL. Uses GNU `stat -c` and `date -d` which are not available on macOS.
+Tested on Windows (Git Bash) and Linux/WSL. Uses only POSIX-portable `date` and `stat` invocations (no GNU-specific `date -d` / `stat -c` flags), so should work on macOS too.
 
 ## License
 
